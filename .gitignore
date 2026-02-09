@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+
+# EEG Data files
+*.edf
+*.bdf
+*.set
+*.fdt
+*.vhdr
+*.vmrk
+*.eeg
+*.cnt
+*.mat
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.fif
+
+# Data directories
+data/
+raw_data/
+datasets/
+
+# Test output (generated results/figures)
+test_output/
+*.png
+*.pdf
+
+# CSV output (generated stats tables)
+*.csv
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Environment
+.env
+.venv/
+env/
+venv/
