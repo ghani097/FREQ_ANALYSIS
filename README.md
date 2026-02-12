@@ -1,20 +1,41 @@
 # EEG Frequency Analysis Tool
 
-A Python-based GUI application for EEG frequency-band power analysis with statistical testing and publication-quality visualizations. Built on MNE-Python.
+A PyQt6 desktop application for comparing EEG frequency-band power between sessions (e.g., pre- vs post-intervention) with cluster-based permutation testing and publication-quality output. Built on MNE-Python.
+
+## What It Does
+
+Point the tool at a folder of EEGLAB `.set/.fdt` files organised by group and session. It will:
+
+1. **Load & align channels** across subjects (handles variable channel counts from bad-channel rejection)
+2. **Compute PSD** via Welch's method for each standard frequency band
+3. **Run statistics** -- cluster-based permutation tests (n >= 5) or paired/independent t-tests with FDR correction
+4. **Generate figures** -- per-band topoplots, summary bar charts, statistics tables (300 DPI PNG)
+5. **Write a methods section** -- ready-to-paste text describing the analysis for a manuscript
 
 ## Features
 
-- **Frequency Band Analysis** - Delta (1-4 Hz), Theta (4-8 Hz), Alpha (8-13 Hz), Beta (13-30 Hz), Gamma (30-45 Hz)
-- **Statistical Testing** - Cluster-based permutation tests, paired/independent t-tests, FDR correction
-- **Multi-Session Support** - Automatic Pre/Post session pairing across multiple time points
-- **Publication-Ready Figures** - Topoplots, summary bar charts, statistics tables (300 DPI)
-- **PyQt6 GUI** - Point-and-click interface for configuring and running analyses
-- **EEGLAB Compatible** - Reads `.set/.fdt` files directly
+- **5 frequency bands** -- Delta (1-4 Hz), Theta (4-8 Hz), Alpha (8-13 Hz), Beta (13-30 Hz), Gamma (30-45 Hz)
+- **Flexible session pairing** -- select any sessions as baseline or comparison; cartesian product pairing (M baselines x N comparisons)
+- **Auto-detection fallback** -- sessions with "pre" in the name default to baseline, "post" to comparison
+- **Adaptive statistics** -- automatically falls back from cluster permutation to t-test when sample size is small
+- **Smart channel alignment** -- finds common channels across subjects, progressively excludes worst-case subjects if needed
+- **Handles epoched data** -- reads EEGLAB epoched `.set` files and concatenates into continuous data, or averages PSD per epoch
+- **Publication outputs** -- topoplots with significance markers, summary bar charts, statistics tables, auto-generated methods and results sections
+- **GUI controls** -- configure resampling, epoch length, frequency range, permutations, alpha levels, test type, and FDR correction
 
 ## Requirements
 
 - Python 3.10+
 - Dependencies listed in `requirements_python.txt`
+
+### Core dependencies
+
+| Package | Purpose |
+|---------|---------|
+| MNE-Python | EEG data loading, PSD, cluster permutation tests, topoplots |
+| NumPy / SciPy | Array operations, t-tests, FDR correction |
+| Matplotlib | Publication figures |
+| PyQt6 | GUI framework |
 
 ## Installation
 
@@ -22,61 +43,83 @@ A Python-based GUI application for EEG frequency-band power analysis with statis
 pip install -r requirements_python.txt
 ```
 
-Or on Windows, run `INSTALL_PYTHON.bat`.
+On Windows you can also run `INSTALL_PYTHON.bat`, which checks for Python and installs all dependencies.
 
 ## Usage
-
-Launch the GUI:
 
 ```bash
 python py_gui_main.py
 ```
 
-### Expected Data Structure
+### Workflow
+
+1. **Browse** to a root data directory and click **Scan Data**
+2. **Assign session roles** -- select which sessions are baseline and which are comparison
+3. **Adjust parameters** if needed (defaults work for most cases)
+4. **Run Analysis** -- results and figures are saved to a `Results_Python/` folder and opened automatically
+
+### Expected data layout
 
 ```
 root_directory/
-├── Group1/
-│   ├── Pre1/
-│   │   ├── subject01.set
-│   │   └── subject02.set
-│   ├── Post1/
-│   │   ├── subject01.set
-│   │   └── subject02.set
-│   ├── Pre2/
-│   └── Post2/
-└── Group2/
-    ├── Pre1/
-    ├── Post1/
-    ├── Pre2/
-    └── Post2/
+  Group1/
+    SessionA/          # e.g., Pre, Baseline
+      subject01.set
+      subject02.set
+    SessionB/          # e.g., Post6W, PostTx
+      subject01.set
+      subject02.set
+  Group2/
+    SessionA/
+    SessionB/
 ```
+
+Folders whose names start with `results` (case-insensitive) are automatically excluded from scanning.
 
 ## Project Structure
 
 ```
 FREQ_ANALYSIS/
-├── py_gui_main.py          # Main GUI application
-├── py_analyzer.py           # Core analysis engine (PSD, statistics)
-├── py_data_loader.py        # EEGLAB .set file loader and validator
-├── py_visualizer.py         # Publication-quality figure generation
-├── py_config.py             # Configuration (bands, params, plot settings)
-├── py_diagnostic.py         # Diagnostic utilities
-├── show_all_markers.py      # Marker inspection utility
-├── requirements_python.txt  # Python dependencies
-├── INSTALL_PYTHON.bat       # Windows installer script
-├── docs/                    # Development notes and documentation
-└── tests/                   # Test scripts
+  py_gui_main.py           # PyQt6 GUI (main window, worker thread)
+  py_analyzer.py            # Analysis engine (PSD, statistics, channel alignment)
+  py_data_loader.py         # EEGLAB .set/.fdt loader and data validator
+  py_visualizer.py          # Figure generation (topoplots, bar charts, tables, methods text)
+  py_config.py              # Configuration constants (bands, defaults, plot settings)
+  py_diagnostic.py          # Diagnostic utilities
+  show_all_markers.py       # Marker/event inspection utility
+  requirements_python.txt   # Python dependencies
+  INSTALL_PYTHON.bat        # Windows installer script
+  docs/                     # Development notes
+  tests/                    # Test scripts
 ```
 
 ## Configuration
 
-Key parameters can be adjusted in `py_config.py` or through the GUI:
+Key parameters are configurable through the GUI or in `py_config.py`:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| Resample Rate | 256 Hz | EEG resampling frequency |
-| Epoch Length | 2.0 s | Epoch window duration |
-| Frequency Range | 1-45 Hz | Analysis frequency range |
-| Permutations | 1000 | Number of permutation iterations |
-| Significance Alpha | 0.05 | Statistical significance threshold |
+| Resample Rate | Original | Keep native sampling rate, or resample to a target Hz |
+| Epoch Length | 2.0 s | Window duration for PSD computation |
+| Frequency Range | 1-45 Hz | Analysis band limits |
+| Permutations | 1000 | Iterations for cluster permutation test |
+| Cluster Alpha | 0.05 | Threshold for cluster formation |
+| Significance Alpha | 0.05 | P-value threshold for significance |
+| Min Neighbor Channels | 2 | Spatial constraint for cluster test |
+| Test Type | Two-tailed | Two-tailed, or one-tailed (positive/negative) |
+| Statistical Method | Auto | Auto, cluster permutation, paired t-test, or independent t-test |
+| FDR Correction | On | Benjamini-Hochberg correction for multiple comparisons |
+
+## Output
+
+Each analysis run creates a timestamped results folder containing:
+
+- **Per-band topoplots** -- 3-panel figures (group A change, group B change, between-group difference) with significance markers
+- **Summary bar chart** -- all bands side-by-side with error bars and significance stars
+- **Statistics table** -- channel-level p-values, t-statistics, and effect sizes
+- **Methods section** -- `.txt` file with a publication-ready description of the analysis pipeline
+- **Results section** -- `.txt` and `.md` summaries of significant findings across all comparisons
+
+## License
+
+This project is provided as-is for research use.
