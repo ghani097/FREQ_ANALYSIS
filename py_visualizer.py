@@ -3,6 +3,8 @@ Publication-quality visualization for EEG frequency analysis results
 """
 
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Must be set before pyplot import (thread-safe, no GUI)
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 from matplotlib import gridspec
@@ -13,6 +15,14 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from py_config import PUBLICATION_PARAMS, FREQUENCY_BANDS
+
+try:
+    from docx import Document
+    from docx.shared import Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    _DOCX_OK = True
+except ImportError:
+    _DOCX_OK = False
 
 
 # Set publication defaults
@@ -38,10 +48,6 @@ class ResultVisualizer:
         band_range = result['band_range']
         comparison_name = result.get('comparison_name', '')
         
-        # Use non-interactive backend to avoid threading issues
-        import matplotlib
-        matplotlib.use('Agg')  # Must be before importing pyplot
-        
         # Create figure
         fig = plt.figure(figsize=(15, 5), facecolor='white')
         fig.suptitle(f'{band_name} Band ({band_range[0]}-{band_range[1]} Hz)',
@@ -54,20 +60,36 @@ class ResultVisualizer:
         ga_a_vs_b = result['ga_a_vs_b']
         info = result['info']
         stats = result['statistics']
+
+        # Defensive: replace NaNs for plotting (e.g., channels missing in a group)
+        ga_diff_a_plot = np.nan_to_num(ga_diff_a, nan=0.0)
+        ga_diff_b_plot = np.nan_to_num(ga_diff_b, nan=0.0)
+        ga_a_vs_b_plot = np.nan_to_num(ga_a_vs_b, nan=0.0)
         
         # Determine color limits
-        vmax_diff = max(np.abs(ga_diff_a).max(), np.abs(ga_diff_b).max())
+        vmax_diff = max(np.abs(ga_diff_a_plot).max(), np.abs(ga_diff_b_plot).max())
         if vmax_diff == 0:
             vmax_diff = 1
         
-        vmax_comp = np.abs(ga_a_vs_b).max()
+        vmax_comp = np.abs(ga_a_vs_b_plot).max()
         if vmax_comp == 0:
             vmax_comp = 1
         
+        # Within-group significance masks (None if not present or all-False)
+        def _valid_mask(key):
+            m = result.get(key)
+            return m if (m is not None and np.any(m)) else None
+
+        mask_a = _valid_mask('sig_mask_group_a_plot')
+        mask_b = _valid_mask('sig_mask_group_b_plot')
+        sig_marker_params = dict(marker='X',
+                                 markerfacecolor=PUBLICATION_PARAMS['colors']['sig_marker'],
+                                 markersize=18, markeredgecolor='white', markeredgewidth=2)
+
         # Panel 1: Group A
         ax1 = plt.subplot(1, 3, 1)
         im1, cn1 = plot_topomap(
-            ga_diff_a,
+            ga_diff_a_plot,
             info,
             axes=ax1,
             cmap=PUBLICATION_PARAMS['colors']['cmap'],
@@ -75,23 +97,27 @@ class ResultVisualizer:
             show=False,
             contours=PUBLICATION_PARAMS['topomap']['contours'],
             sensors=PUBLICATION_PARAMS['topomap']['sensors'],
-            names=result['ch_names'] if PUBLICATION_PARAMS['topomap']['show_names'] else None
+            names=result['ch_names'] if PUBLICATION_PARAMS['topomap']['show_names'] else None,
+            mask=mask_a,
+            mask_params=sig_marker_params if mask_a is not None else None
         )
         ax1.set_title(f"{result['group_a']}: {result['post_session']} - {result['pre_session']}\n"
                      f"(n={result['n_subj_a']})",
                      fontsize=PUBLICATION_PARAMS['font']['label_size'])
-        
+
         # Panel 2: Group B
         ax2 = plt.subplot(1, 3, 2)
         im2, cn2 = plot_topomap(
-            ga_diff_b,
+            ga_diff_b_plot,
             info,
             axes=ax2,
             cmap=PUBLICATION_PARAMS['colors']['cmap'],
             vlim=(-vmax_diff, vmax_diff),
             show=False,
             contours=PUBLICATION_PARAMS['topomap']['contours'],
-            sensors=PUBLICATION_PARAMS['topomap']['sensors']
+            sensors=PUBLICATION_PARAMS['topomap']['sensors'],
+            mask=mask_b,
+            mask_params=sig_marker_params if mask_b is not None else None
         )
         ax2.set_title(f"{result['group_b']}: {result['post_session']} - {result['pre_session']}\n"
                      f"(n={result['n_subj_b']})",
@@ -104,10 +130,14 @@ class ResultVisualizer:
         sig_level, sig_color, p_str = self._get_significance_info(stats)
         
         # Plot with highlighted channels
-        mask = stats['sig_mask'] if np.any(stats['sig_mask']) else None
+        mask = result.get('sig_mask_plot', None)
+        if mask is None:
+            mask = stats.get('sig_mask', None)
+        if mask is not None and not np.any(mask):
+            mask = None
         
         im3, cn3 = plot_topomap(
-            ga_a_vs_b,
+            ga_a_vs_b_plot,
             info,
             axes=ax3,
             cmap=PUBLICATION_PARAMS['colors']['cmap'],
@@ -170,10 +200,6 @@ class ResultVisualizer:
         if n_bands == 0:
             return None
         
-        # Use non-interactive backend
-        import matplotlib
-        matplotlib.use('Agg')
-        
         # Create figure
         fig = plt.figure(figsize=(4*n_bands, 12), facecolor='white')
         
@@ -200,19 +226,36 @@ class ResultVisualizer:
             ga_a_vs_b = result['ga_a_vs_b']
             info = result['info']
             stats = result['statistics']
+
+            ga_diff_a_plot = np.nan_to_num(ga_diff_a, nan=0.0)
+            ga_diff_b_plot = np.nan_to_num(ga_diff_b, nan=0.0)
+            ga_a_vs_b_plot = np.nan_to_num(ga_a_vs_b, nan=0.0)
             
             # Determine color limits
-            vmax = max(np.abs(ga_diff_a).max(), np.abs(ga_diff_b).max())
+            vmax = max(np.abs(ga_diff_a_plot).max(), np.abs(ga_diff_b_plot).max())
             if vmax == 0:
                 vmax = 1
             
+            # Within-group significance masks for this band
+            def _valid_mask_s(key):
+                m = result.get(key)
+                return m if (m is not None and np.any(m)) else None
+
+            mask_a_s = _valid_mask_s('sig_mask_group_a_plot')
+            mask_b_s = _valid_mask_s('sig_mask_group_b_plot')
+            sm_params = dict(marker='X',
+                             markerfacecolor=PUBLICATION_PARAMS['colors']['sig_marker'],
+                             markersize=15, markeredgecolor='white', markeredgewidth=1.5)
+
             # Row 1: Group A
             ax1 = fig.add_subplot(gs[0, idx])
             plot_topomap(
-                ga_diff_a, info, axes=ax1,
+                ga_diff_a_plot, info, axes=ax1,
                 cmap=PUBLICATION_PARAMS['colors']['cmap'],
                 vlim=(-vmax, vmax), show=False,
-                contours=4, sensors=True
+                contours=4, sensors=True,
+                mask=mask_a_s,
+                mask_params=sm_params if mask_a_s is not None else None
             )
             if idx == 0:
                 ax1.set_ylabel(f"{result['group_a']}\n(Post-Pre)",
@@ -220,14 +263,16 @@ class ResultVisualizer:
                               fontweight='bold')
             ax1.set_title(f"{band_name}\n{band_range[0]}-{band_range[1]} Hz",
                          fontsize=PUBLICATION_PARAMS['font']['size'] + 1)
-            
+
             # Row 2: Group B
             ax2 = fig.add_subplot(gs[1, idx])
             plot_topomap(
-                ga_diff_b, info, axes=ax2,
+                ga_diff_b_plot, info, axes=ax2,
                 cmap=PUBLICATION_PARAMS['colors']['cmap'],
                 vlim=(-vmax, vmax), show=False,
-                contours=4, sensors=True
+                contours=4, sensors=True,
+                mask=mask_b_s,
+                mask_params=sm_params if mask_b_s is not None else None
             )
             if idx == 0:
                 ax2.set_ylabel(f"{result['group_b']}\n(Post-Pre)",
@@ -236,15 +281,19 @@ class ResultVisualizer:
             
             # Row 3: A vs B
             ax3 = fig.add_subplot(gs[2, idx])
-            vmax_comp = np.abs(ga_a_vs_b).max()
+            vmax_comp = np.abs(ga_a_vs_b_plot).max()
             if vmax_comp == 0:
                 vmax_comp = 1
             
-            mask = stats['sig_mask'] if np.any(stats['sig_mask']) else None
+            mask = result.get('sig_mask_plot', None)
+            if mask is None:
+                mask = stats.get('sig_mask', None)
+            if mask is not None and not np.any(mask):
+                mask = None
             sig_level, sig_color, p_str = self._get_significance_info(stats)
             
             plot_topomap(
-                ga_a_vs_b, info, axes=ax3,
+                ga_a_vs_b_plot, info, axes=ax3,
                 cmap=PUBLICATION_PARAMS['colors']['cmap'],
                 vlim=(-vmax_comp, vmax_comp), show=False,
                 contours=4, sensors=True,
@@ -347,7 +396,7 @@ class ResultVisualizer:
         
         return sig_level, sig_color, p_str
 
-    def plot_statistics_table(self, all_results: Dict, comparison_name: str = None):
+    def plot_statistics_table(self, all_results: Dict, comparison_name: str = None, sig_alpha: float = 0.05):
         """Create a table figure showing t-values and p-values for all bands.
 
         Args:
@@ -363,50 +412,60 @@ class ResultVisualizer:
         if n_bands == 0:
             return None
 
-        # Use non-interactive backend
-        import matplotlib
-        matplotlib.use('Agg')
-
         # Collect data for table
         table_data = []
         for band_name in band_names:
             result = all_results[band_name]
             stats = result['statistics']
+            stats_a = result.get('statistics_group_a', {})
+            stats_b = result.get('statistics_group_b', {})
 
-            # Get t-value statistics
+            # Get interaction t-value statistics
             t_obs = stats['t_obs']
             t_mean = np.mean(t_obs)
             t_max = np.max(t_obs)
             t_min = np.min(t_obs)
 
-            # Get p-values
-            p_pos = stats['positive_clusters'][0]['pval'] if stats['positive_clusters'] else 1.0
-            p_neg = stats['negative_clusters'][0]['pval'] if stats['negative_clusters'] else 1.0
+            # Interaction p-values
+            p_pos = stats['positive_clusters'][0]['pval'] if stats.get('positive_clusters') else 1.0
+            p_neg = stats['negative_clusters'][0]['pval'] if stats.get('negative_clusters') else 1.0
 
-            # Number of significant channels
-            n_sig = np.sum(stats['sig_mask'])
+            # Within-group p-values (best cluster per group)
+            def _best_p(st):
+                p_p = st['positive_clusters'][0]['pval'] if st.get('positive_clusters') else 1.0
+                p_n = st['negative_clusters'][0]['pval'] if st.get('negative_clusters') else 1.0
+                return min(p_p, p_n)
 
-            # Significance stars
+            p_grp_a = _best_p(stats_a) if stats_a else 1.0
+            p_grp_b = _best_p(stats_b) if stats_b else 1.0
+
+            # Number of significant channels (interaction)
+            n_sig = np.sum(stats.get('sig_mask', []))
+
+            # Significance stars for interaction
             min_p = min(p_pos, p_neg)
-            if min_p < 0.001:
+            if min_p < sig_alpha * 0.02:
                 sig_stars = '***'
-            elif min_p < 0.01:
+            elif min_p < sig_alpha * 0.20:
                 sig_stars = '**'
-            elif min_p < 0.05:
+            elif min_p < sig_alpha:
                 sig_stars = '*'
-            elif min_p < 0.10:
+            elif min_p < sig_alpha * 2.0:
                 sig_stars = '^'
             else:
                 sig_stars = ''
 
+            def _p_str(p):
+                return f"{p:.4f}" if p < 1.0 else "n.s."
+
             table_data.append([
                 band_name,
                 f"{result['band_range'][0]}-{result['band_range'][1]}",
+                _p_str(p_grp_a),
+                _p_str(p_grp_b),
                 f"{t_mean:.3f}",
-                f"{t_min:.3f}",
-                f"{t_max:.3f}",
-                f"{p_pos:.4f}" if p_pos < 1.0 else "n.s.",
-                f"{p_neg:.4f}" if p_neg < 1.0 else "n.s.",
+                _p_str(p_pos),
+                _p_str(p_neg),
                 f"{n_sig}",
                 sig_stars
             ])
@@ -435,8 +494,12 @@ class ResultVisualizer:
                     fontsize=PUBLICATION_PARAMS['font']['title_size'],
                     fontweight='bold', y=0.98)
 
-        # Column headers
-        columns = ['Band', 'Hz', 't(mean)', 't(min)', 't(max)', 'p(+)', 'p(-)', 'Sig Ch', 'Sig']
+        # Column headers — now includes within-group p-values
+        group_a_label = all_results[band_names[0]].get('group_a', 'GrpA')
+        group_b_label = all_results[band_names[0]].get('group_b', 'GrpB')
+        columns = ['Band', 'Hz',
+                   f'{group_a_label} p', f'{group_b_label} p',
+                   'Int t(mean)', 'Int p(+)', 'Int p(-)', 'Sig Ch', 'Sig']
 
         # Create table
         table = ax.table(
@@ -444,7 +507,7 @@ class ResultVisualizer:
             colLabels=columns,
             loc='center',
             cellLoc='center',
-            colWidths=[0.10, 0.08, 0.10, 0.10, 0.10, 0.12, 0.12, 0.08, 0.06]
+            colWidths=[0.09, 0.07, 0.09, 0.09, 0.09, 0.09, 0.09, 0.07, 0.05]
         )
 
         # Style the table
@@ -481,7 +544,10 @@ class ResultVisualizer:
                     cell.set_text_props(fontweight='bold')
 
         # Add legend
-        legend_text = "Significance: *** p<0.001, ** p<0.01, * p<0.05, ^ p<0.10, n.s. = not significant"
+        t1 = round(sig_alpha * 0.02, 4)
+        t2 = round(sig_alpha * 0.20, 4)
+        legend_text = (f"Significance (α={sig_alpha}): *** p<{t1}, ** p<{t2},"
+                       f" * p<{sig_alpha}, ^ p<{round(sig_alpha*2, 3)}, n.s. = not significant")
         fig.text(0.5, 0.02, legend_text, ha='center', fontsize=9, style='italic')
 
         # Adjust layout
@@ -546,13 +612,13 @@ class ResultVisualizer:
             cluster_alpha = config.get('cluster_alpha', 0.05)
             sig_alpha = config.get('significance_alpha', 0.05)
             epoch_length = config.get('epoch_length', 2.0)
-            resample_rate = config.get('resample_rate', 256)
+            resample_rate = config.get('detected_sfreq', config.get('resample_rate'))
         else:
             n_perm = 1000
             cluster_alpha = 0.05
             sig_alpha = 0.05
             epoch_length = 2.0
-            resample_rate = 256
+            resample_rate = None
 
         # Generate appropriate methods text based on statistical method used
         if method == 'cluster_permutation':
@@ -575,17 +641,21 @@ class ResultVisualizer:
             )
             method_type = "cluster_permutation"
 
-        # Save to file
-        if comparison_name:
-            filename = f'{comparison_name}_methods_section_{method_type}.txt'
-        else:
-            filename = f'methods_section_{method_type}.txt'
+        # Save as .docx (primary) + .txt (backup)
+        stem = f'{comparison_name}_methods_section_{method_type}' if comparison_name \
+               else f'methods_section_{method_type}'
 
-        output_file = self.figures_dir / filename
-        with open(output_file, 'w', encoding='utf-8') as f:
+        txt_file = self.figures_dir / f'{stem}.txt'
+        with open(txt_file, 'w', encoding='utf-8') as f:
             f.write(methods_text)
 
-        return str(output_file)
+        docx_file = self.figures_dir / f'{stem}.docx'
+        self._save_lines_as_docx(
+            methods_text.splitlines(),
+            docx_file,
+            title="EEG Frequency Analysis — Methods Section",
+        )
+        return str(docx_file)
 
     def _generate_cluster_methods(self, n_a: int, n_b: int, group_a: str, group_b: str,
                                    bands_str: str, n_perm: int, cluster_alpha: float,
@@ -600,7 +670,7 @@ EEG Statistical Analysis
 ------------------------
 
 Power spectral density (PSD) was computed using Welch's method with {epoch_length}-second
-epochs and 50% overlap. Data were resampled to {resample_rate} Hz prior to analysis.
+epochs and 50% overlap. {resample_text}
 Frequency band power was extracted for the following bands: {bands_str}.
 
 For each participant, the change in band power from pre- to post-intervention was
@@ -638,7 +708,9 @@ Maris, E., & Oostenveld, R. (2007). Nonparametric statistical testing of EEG- an
 ================================================================================
 """.format(
             epoch_length=epoch_length,
-            resample_rate=resample_rate,
+            resample_text=(f"Data were resampled to {resample_rate} Hz prior to analysis."
+                           if resample_rate else
+                           "Data were analyzed at their original sampling rate."),
             bands_str=bands_str,
             group_a=group_a,
             n_a=n_a,
@@ -663,7 +735,7 @@ EEG Statistical Analysis
 ------------------------
 
 Power spectral density (PSD) was computed using Welch's method with {epoch_length}-second
-epochs and 50% overlap. Data were resampled to {resample_rate} Hz prior to analysis.
+epochs and 50% overlap. {resample_text}
 Frequency band power was extracted for the following bands: {bands_str}.
 
 For each participant, the change in band power from pre- to post-intervention was
@@ -699,7 +771,9 @@ Maris, E., & Oostenveld, R. (2007). Nonparametric statistical testing of EEG-
 ================================================================================
 """.format(
             epoch_length=epoch_length,
-            resample_rate=resample_rate,
+            resample_text=(f"Data were resampled to {resample_rate} Hz prior to analysis."
+                           if resample_rate else
+                           "Data were analyzed at their original sampling rate."),
             bands_str=bands_str,
             group_a=group_a,
             n_a=n_a,
@@ -752,9 +826,19 @@ Maris, E., & Oostenveld, R. (2007). Nonparametric statistical testing of EEG-
         lines.append("-" * 40)
         lines.append("")
 
-        # Get sample size info from first comparison
+        # Filter out empty comparisons and metadata keys
+        all_comparisons = {
+            k: v for k, v in all_comparisons.items()
+            if not k.startswith('_') and isinstance(v, dict) and v
+        }
+        if not all_comparisons:
+            return None
+
+        # Get sample size info from first non-empty comparison
         first_comp_name = list(all_comparisons.keys())[0]
         first_comp = all_comparisons[first_comp_name]
+        if not first_comp:
+            return None
         first_band = list(first_comp.keys())[0]
         first_result = first_comp[first_band]
 
@@ -835,15 +919,15 @@ Maris, E., & Oostenveld, R. (2007). Nonparametric statistical testing of EEG-
                     min_p = None
                     direction = None
 
-                # Significance stars
+                # Significance stars (thresholds relative to sig_alpha)
                 if min_p is not None:
-                    if min_p < 0.001:
+                    if min_p < sig_alpha * 0.02:
                         sig_str = "***"
-                    elif min_p < 0.01:
+                    elif min_p < sig_alpha * 0.20:
                         sig_str = "**"
-                    elif min_p < 0.05:
+                    elif min_p < sig_alpha:
                         sig_str = "*"
-                    elif min_p < 0.10:
+                    elif min_p < sig_alpha * 2.0:
                         sig_str = "^"
                     else:
                         sig_str = ""
@@ -865,7 +949,7 @@ Maris, E., & Oostenveld, R. (2007). Nonparametric statistical testing of EEG-
                 })
 
                 # Track significant findings
-                if min_p is not None and min_p < 0.05:
+                if min_p is not None and min_p < sig_alpha:
                     significant_findings.append({
                         'band': band_name,
                         'range': result['band_range'],
@@ -891,7 +975,7 @@ Maris, E., & Oostenveld, R. (2007). Nonparametric statistical testing of EEG-
                 lines.append(f"{row['band']:<10} {row['range']:<8} {row['t_mean']:<10.3f} {row['t_min']:<10.3f} {row['t_max']:<10.3f} {p_str:<12} {row['n_sig']:<8} {row['sig_str']:<5}")
 
             lines.append("-" * 80)
-            lines.append("Note: * p < .05, ** p < .01, *** p < .001, ^ p < .10 (trend)")
+            lines.append(f"Note: * p < {sig_alpha}, ** p < {round(sig_alpha*0.20,4)}, *** p < {round(sig_alpha*0.02,4)}, ^ p < {round(sig_alpha*2,3)} (trend)")
             lines.append(f"Sig Ch = Number of electrodes showing significant effects (p < {sig_alpha})")
             lines.append("")
 
@@ -957,11 +1041,11 @@ Maris, E., & Oostenveld, R. (2007). Nonparametric statistical testing of EEG-
                     p_pos = stats['positive_clusters'][0]['pval'] if stats['positive_clusters'] else None
                     p_neg = stats['negative_clusters'][0]['pval'] if stats['negative_clusters'] else None
 
-                    if p_pos is not None and p_pos < 0.05:
+                    if p_pos is not None and p_pos < sig_alpha:
                         any_significant = True
                         n_sig = np.sum(stats['sig_mask'])
                         lines.append(f"{comp_name:<20} {band_name:<10} {p_pos:<12.4f} {'Positive':<12} {n_sig:<10}")
-                    if p_neg is not None and p_neg < 0.05:
+                    if p_neg is not None and p_neg < sig_alpha:
                         any_significant = True
                         n_sig = np.sum(stats['sig_mask'])
                         lines.append(f"{comp_name:<20} {band_name:<10} {p_neg:<12.4f} {'Negative':<12} {n_sig:<10}")
@@ -985,7 +1069,7 @@ Maris, E., & Oostenveld, R. (2007). Nonparametric statistical testing of EEG-
                     stats = result['statistics']
                     p_pos = stats['positive_clusters'][0]['pval'] if stats['positive_clusters'] else 1.0
                     p_neg = stats['negative_clusters'][0]['pval'] if stats['negative_clusters'] else 1.0
-                    if min(p_pos, p_neg) < 0.05:
+                    if min(p_pos, p_neg) < sig_alpha:
                         sig_bands.append(band_name)
                 comp_summaries[comp_name] = sig_bands
 
@@ -1008,20 +1092,213 @@ Maris, E., & Oostenveld, R. (2007). Nonparametric statistical testing of EEG-
         lines.append("edit as needed for your specific publication requirements.")
         lines.append("")
 
-        # Write to file
-        output_file = self.figures_dir / 'RESULTS_SECTION.txt'
-        with open(output_file, 'w', encoding='utf-8') as f:
+        # Plain-text backup
+        txt_file = self.figures_dir / 'RESULTS_SECTION.txt'
+        with open(txt_file, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines))
 
-        # Also create a formatted version with markdown
-        md_lines = self._convert_results_to_markdown(lines, all_comparisons)
+        # Markdown version (with embedded figure references)
+        md_lines = self._convert_results_to_markdown(lines, all_comparisons, sig_alpha=sig_alpha)
         md_file = self.figures_dir / 'RESULTS_SECTION.md'
         with open(md_file, 'w', encoding='utf-8') as f:
             f.write('\n'.join(md_lines))
 
-        return str(output_file)
+        # Word document with embedded images and proper tables
+        docx_file = self.figures_dir / 'RESULTS_SECTION.docx'
+        self._save_results_docx(all_comparisons, config, docx_file, sig_alpha=sig_alpha)
 
-    def _convert_results_to_markdown(self, text_lines: List[str], all_comparisons: Dict) -> List[str]:
+        return str(docx_file)
+
+    def _find_figure(self, comparison_name: str, figure_type: str) -> Optional[Path]:
+        """Locate a saved figure PNG by comparison name + type suffix."""
+        if comparison_name:
+            p = self.figures_dir / f'{comparison_name}_{figure_type}.png'
+            if p.exists():
+                return p
+        # Fallback: no comparison prefix
+        p = self.figures_dir / f'{figure_type}.png'
+        return p if p.exists() else None
+
+    def _save_results_docx(
+        self,
+        all_comparisons: Dict,
+        config: Optional[Dict],
+        output_path: Path,
+        sig_alpha: float = 0.05,
+    ) -> None:
+        """Build a Word document with embedded topoplot images and statistics tables."""
+        if not _DOCX_OK:
+            return
+
+        from docx import Document as _Doc
+        from docx.shared import Pt, Inches, Cm
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+        doc = _Doc()
+
+        # Margins
+        for sec in doc.sections:
+            sec.top_margin    = Cm(2)
+            sec.bottom_margin = Cm(2)
+            sec.left_margin   = Cm(2.5)
+            sec.right_margin  = Cm(2.5)
+
+        # Title
+        t = doc.add_heading("EEG Frequency Analysis — Results Section", level=1)
+        t.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        # Config summary line
+        if config:
+            p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = p.add_run(
+                f"Method: {config.get('statistical_method', 'auto')}  |  "
+                f"\u03b1 = {config.get('significance_alpha', 0.05)}  |  "
+                f"Epoch: {config.get('epoch_length', 2.0)} s  |  "
+                f"Freq: {config.get('freq_range', (1, 45))[0]}\u2013"
+                f"{config.get('freq_range', (1, 45))[1]} Hz"
+            )
+            run.font.size  = Pt(9)
+            run.font.color.rgb = RGBColor(0x80, 0x80, 0x90)
+        doc.add_paragraph()
+
+        for comp_name, band_results in all_comparisons.items():
+            if comp_name.startswith('_') or not band_results:
+                continue
+
+            # Parse session labels
+            if '_vs_' in comp_name:
+                post_s, pre_s = comp_name.split('_vs_', 1)
+            else:
+                post_s, pre_s = "Post", "Pre"
+
+            doc.add_heading(f"Comparison: {post_s} vs {pre_s}", level=2)
+
+            first_result = list(band_results.values())[0]
+            group_a = first_result['group_a']
+            group_b = first_result['group_b']
+            n_a     = first_result['n_subj_a']
+            n_b     = first_result['n_subj_b']
+            method  = first_result['statistics'].get('method', 'unknown')
+
+            doc.add_paragraph(
+                f"Frequency band analysis comparing {post_s} vs {pre_s} between "
+                f"{group_a} (n\u2009=\u2009{n_a}) and {group_b} (n\u2009=\u2009{n_b}). "
+                f"Statistical method: {method.replace('_', ' ')}."
+            ).style.font.size = Pt(11)
+
+            # ── Statistics table ────────────────────────────────────────────
+            doc.add_heading("Statistical Summary", level=3)
+            tbl = doc.add_table(rows=1, cols=7)
+            tbl.style = 'Table Grid'
+            hdrs = ["Band", f"n ({group_a})", f"n ({group_b})",
+                    "Mean |t|", "Max |t|", "Sig Channels", "Best p"]
+            for i, h in enumerate(hdrs):
+                cell = tbl.rows[0].cells[i]
+                cell.text = h
+                for run in cell.paragraphs[0].runs:
+                    run.font.bold = True
+                    run.font.size = Pt(9)
+
+            for band_name, result in band_results.items():
+                stats   = result['statistics']
+                t_obs   = stats['t_obs']
+                t_abs   = np.abs(t_obs)
+                n_sig   = int(np.sum(stats['sig_mask']))
+                p_pos   = (stats.get('positive_clusters') or [{'pval': 1.0}])[0]['pval']
+                p_neg   = (stats.get('negative_clusters') or [{'pval': 1.0}])[0]['pval']
+                best_p  = min(p_pos, p_neg)
+
+                row = tbl.add_row().cells
+                row[0].text = band_name
+                row[1].text = str(result['n_subj_a'])
+                row[2].text = str(result['n_subj_b'])
+                row[3].text = f"{float(np.mean(t_abs)):.3f}"
+                row[4].text = f"{float(np.max(t_abs)):.3f}"
+                row[5].text = str(n_sig)
+                row[6].text = f"{best_p:.4f}" if best_p < 1.0 else "ns"
+                for cell in row:
+                    for para in cell.paragraphs:
+                        for run in para.runs:
+                            run.font.size = Pt(9)
+            doc.add_paragraph()
+
+            # ── Summary topoplot ─────────────────────────────────────────────
+            summary_png = self._find_figure(comp_name, 'summary')
+            if summary_png:
+                doc.add_heading("Summary — All Bands", level=3)
+                try:
+                    doc.add_picture(str(summary_png), width=Inches(6.0))
+                    doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                except Exception:
+                    pass
+                doc.add_paragraph()
+
+            # ── Statistics table image ───────────────────────────────────────
+            stats_png = self._find_figure(comp_name, 'statistics_table')
+            if stats_png:
+                doc.add_heading("Statistics Table", level=3)
+                try:
+                    doc.add_picture(str(stats_png), width=Inches(6.0))
+                    doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                except Exception:
+                    pass
+                doc.add_paragraph()
+
+            # ── Per-band topoplots ───────────────────────────────────────────
+            doc.add_heading("Frequency Band Topoplots", level=3)
+            for band_name, result in band_results.items():
+                topo_png = self._find_figure(comp_name, f'topo_{band_name}')
+                if topo_png:
+                    br = result.get('band_range', ('?', '?'))
+                    doc.add_heading(
+                        f"{band_name} Band  ({br[0]}\u2013{br[1]} Hz)", level=4
+                    )
+                    try:
+                        doc.add_picture(str(topo_png), width=Inches(6.0))
+                        doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    except Exception:
+                        pass
+                    doc.add_paragraph()
+
+            doc.add_page_break()
+
+        doc.add_paragraph(
+            "This document was automatically generated by ResearchBuddy. "
+            "Please review and edit as needed for publication."
+        ).style.font.size = Pt(9)
+
+        doc.save(str(output_path))
+
+    def _save_lines_as_docx(self, lines: List[str], output_path: Path, title: str = "") -> None:
+        """Save text lines as a plain Word document (used for methods section)."""
+        if not _DOCX_OK:
+            return
+
+        from docx import Document as _Doc
+
+        doc = _Doc()
+        if title:
+            h = doc.add_heading(title, level=1)
+            h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("=") or stripped.startswith("-"):
+                continue  # skip decorative separators
+            if stripped == "":
+                doc.add_paragraph()
+            elif stripped.isupper() and 4 < len(stripped) < 80:
+                doc.add_heading(stripped.title(), level=2)
+            elif stripped.startswith("Session Comparison:"):
+                doc.add_heading(stripped, level=2)
+            else:
+                p = doc.add_paragraph(stripped)
+                p.style.font.size = Pt(11)
+
+        doc.save(str(output_path))
+
+    def _convert_results_to_markdown(self, text_lines: List[str], all_comparisons: Dict, sig_alpha: float = 0.05) -> List[str]:
         """Convert results section to markdown format with embedded images."""
         md = []
         md.append("# Results")
@@ -1104,11 +1381,11 @@ Maris, E., & Oostenveld, R. (2007). Nonparametric statistical testing of EEG-
                     direction = None
 
                 if min_p is not None:
-                    if min_p < 0.001:
-                        p_str = "< .001***"
-                    elif min_p < 0.01:
+                    if min_p < sig_alpha * 0.02:
+                        p_str = f"< {round(sig_alpha*0.02,4)}***"
+                    elif min_p < sig_alpha * 0.20:
                         p_str = f"{min_p:.3f}**"
-                    elif min_p < 0.05:
+                    elif min_p < sig_alpha:
                         p_str = f"{min_p:.3f}*"
                     else:
                         p_str = f"{min_p:.3f}"
@@ -1118,7 +1395,7 @@ Maris, E., & Oostenveld, R. (2007). Nonparametric statistical testing of EEG-
                 band_range = f"{result['band_range'][0]}-{result['band_range'][1]}"
                 md.append(f"| {band_name} | {band_range} | {t_mean:.3f} | {t_min:.3f} | {t_max:.3f} | {p_str} | {n_sig} |")
 
-                if min_p is not None and min_p < 0.05:
+                if min_p is not None and min_p < sig_alpha:
                     significant_findings.append({
                         'band': band_name,
                         'range': result['band_range'],
@@ -1129,7 +1406,7 @@ Maris, E., & Oostenveld, R. (2007). Nonparametric statistical testing of EEG-
                     })
 
             md.append("")
-            md.append("*Note: \\* p < .05, \\*\\* p < .01, \\*\\*\\* p < .001*")
+            md.append(f"*Note: \\* p < {sig_alpha}, \\*\\* p < {round(sig_alpha*0.20,4)}, \\*\\*\\* p < {round(sig_alpha*0.02,4)}*")
             md.append("")
 
             # Narrative
@@ -1165,7 +1442,7 @@ Maris, E., & Oostenveld, R. (2007). Nonparametric statistical testing of EEG-
                     stats = result['statistics']
                     p_pos = stats['positive_clusters'][0]['pval'] if stats['positive_clusters'] else 1.0
                     p_neg = stats['negative_clusters'][0]['pval'] if stats['negative_clusters'] else 1.0
-                    if min(p_pos, p_neg) < 0.05:
+                    if min(p_pos, p_neg) < sig_alpha:
                         sig_bands.append(band_name)
 
                 if sig_bands:

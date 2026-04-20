@@ -22,6 +22,8 @@ Point the tool at a folder of EEGLAB `.set/.fdt` files organised by group and se
 - **Handles epoched data** -- reads EEGLAB epoched `.set` files and concatenates into continuous data, or averages PSD per epoch
 - **Publication outputs** -- topoplots with significance markers, summary bar charts, statistics tables, auto-generated methods and results sections
 - **GUI controls** -- configure resampling, epoch length, frequency range, permutations, alpha levels, test type, and FDR correction
+- **Headless runner** -- scriptable CLI via `run_freq.py` for automated pipelines
+- **Universal mode** -- optional `py_gui_universal.py` / `py_freq_universal.py` workflow for N groups and all ordered session-pair comparisons
 
 ## Requirements
 
@@ -49,6 +51,14 @@ On Windows you can also run `INSTALL_PYTHON.bat`, which checks for Python and in
 
 ```bash
 python py_gui_main.py
+```
+
+### Scripted / headless usage
+
+```bash
+python run_freq.py --input E:\path\to\data --output E:\path\to\results
+python run_freq.py --input E:\path\to\data --output E:\path\to\results --baseline-sessions pre --comparison-sessions post6W post12W post16W
+python py_gui_universal.py
 ```
 
 ### Workflow
@@ -85,6 +95,10 @@ FREQ_ANALYSIS/
   py_data_loader.py         # EEGLAB .set/.fdt loader and data validator
   py_visualizer.py          # Figure generation (topoplots, bar charts, tables, methods text)
   py_config.py              # Configuration constants (bands, defaults, plot settings)
+  py_freq_universal.py      # Universal N-group / N-session analysis engine
+  py_gui_universal.py       # Universal PyQt6 GUI
+  run_freq.py               # Headless CLI runner
+  diag_cluster_pvalues.py   # Diagnostic cluster-permutation helper
   py_diagnostic.py          # Diagnostic utilities
   show_all_markers.py       # Marker/event inspection utility
   requirements_python.txt   # Python dependencies

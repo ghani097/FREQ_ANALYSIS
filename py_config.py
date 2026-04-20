@@ -2,27 +2,30 @@
 Configuration settings for EEG Frequency Analysis Tool
 """
 
-# Frequency band definitions (Hz)
+# Frequency band definitions (Hz) — matched to FieldTrip gold standard
 FREQUENCY_BANDS = {
     'Delta': (1, 4),
-    'Theta': (4, 8),
-    'Alpha': (8, 13),
-    'Beta': (13, 30),
-    'Gamma': (30, 45)
+    'Theta': (4.1, 8),
+    'Alpha': (8.1, 12),
+    'Beta': (12.1, 32),
+    'Gamma': (32.1, 80)
 }
 
 # Default analysis parameters
 DEFAULT_PARAMS = {
-    'resample_rate': 256,  # Hz
+    'resample_rate': None,  # None = use original sampling rate from data
     'epoch_length': 2.0,   # seconds
-    'freq_range': (1, 45), # Hz
-    'n_permutations': 1000,
+    'freq_range': (1, 80), # Hz — extended to 80 Hz to match FieldTrip
+    'n_permutations': 5000, # 5000 for publication-quality (matches FieldTrip)
     'cluster_alpha': 0.05,
     'significance_alpha': 0.05,
     'min_neighbor_chan': 2,
     'tail': 0,  # 0=two-tailed, 1=right, -1=left
     'n_jobs': -1,  # Use all CPUs
-    'min_sample_for_permutation': 5  # Fallback to t-tests if n < 5
+    'min_sample_for_permutation': 5,  # Fallback to t-tests if n < 5
+    'adjacency_method': 'mne',        # 'mne' | 'data' | 'none'
+    'max_epochs': 120,                # Max epochs per subject per session (0 = no limit)
+    'apply_epoch_rejection': True     # Respect EEGLAB EEG.reject.rejmanual marks
 }
 
 # Visualization settings for publication

@@ -21,13 +21,21 @@ class EEGDataLoader:
         self.sessions = []
         self.subjects = {}
         
-    def scan_directory(self) -> Dict:
-        """Scan root directory for groups and sessions"""
-        
-        # Find group folders
-        self.groups = [d.name for d in self.root_dir.iterdir() 
-                      if d.is_dir() and not d.name.startswith('.') 
-                      and d.name.lower() != 'results']
+    def scan_directory(self, exclude_dirs: Optional[List[str]] = None) -> Dict:
+        """Scan root directory for groups and sessions
+
+        Args:
+            exclude_dirs: Optional list of directory names to exclude (case-insensitive).
+                         Directories starting with 'results' are always excluded.
+        """
+
+        exclude_set = {d.lower() for d in (exclude_dirs or [])}
+
+        # Find group folders (exclude results* dirs and user-specified dirs)
+        self.groups = [d.name for d in self.root_dir.iterdir()
+                      if d.is_dir() and not d.name.startswith('.')
+                      and not d.name.lower().startswith('results')
+                      and d.name.lower() not in exclude_set]
         
         if not self.groups:
             raise ValueError(f"No group folders found in {self.root_dir}")
@@ -76,22 +84,150 @@ class EEGDataLoader:
         matched = sorted(list(subjects1 & subjects2))
         return matched
     
-    def load_set_file(self, filepath: Path, resample_rate: int = None) -> mne.io.Raw:
-        """Load EEGLAB .set file and return MNE Raw object"""
-        
-        # Load with MNE
+    def _read_rejection_mask(self, filepath: Path) -> Optional[np.ndarray]:
+        """Read EEG.reject.rejmanual from an EEGLAB .set file.
+
+        Returns a 1-D boolean array (True = rejected) with length equal to
+        the number of epochs, or None if the field is absent / unreadable.
+        """
+        try:
+            import scipy.io
+            mat = scipy.io.loadmat(
+                str(filepath),
+                squeeze_me=True,
+                struct_as_record=False,
+                variable_names=['EEG']
+            )
+            eeg = mat.get('EEG')
+            if eeg is None:
+                return None
+            reject = getattr(eeg, 'reject', None)
+            if reject is None:
+                return None
+            rejmanual = getattr(reject, 'rejmanual', None)
+            if rejmanual is None:
+                return None
+            arr = np.asarray(rejmanual).flatten()
+            if arr.size == 0:
+                return None
+            return arr.astype(bool)
+        except Exception:
+            # File may be HDF5 (.mat v7.3) — fall back silently
+            return None
+
+    def load_set_file(self, filepath: Path, resample_rate: int = None,
+                      ignore_epochs: bool = True,
+                      max_epochs: int = None,
+                      apply_epoch_rejection: bool = True):
+        """Load EEGLAB .set file.
+
+        Handles both continuous (raw) and epoched .set files.
+
+        Args:
+            filepath: Path to the .set file.
+            resample_rate: Target sample rate in Hz, or None to keep original.
+            ignore_epochs: If True, epoched files are concatenated into
+                continuous data (RawArray). If False, epoched files are
+                returned as mne.Epochs for per-epoch PSD computation.
+            max_epochs: Maximum number of epochs to keep (random subset, seed=42).
+                None or 0 means keep all.
+            apply_epoch_rejection: If True, read EEG.reject.rejmanual and
+                remove manually-rejected epochs before further processing.
+
+        Returns:
+            mne.io.Raw for continuous data (or when ignore_epochs=True),
+            mne.Epochs when the file is epoched and ignore_epochs=False.
+        """
+        max_epochs = max_epochs or None  # treat 0 as None
+
         with warnings.catch_warnings():
             warnings.filterwarnings('ignore', category=RuntimeWarning)
-            raw = mne.io.read_raw_eeglab(filepath, preload=True, verbose=False)
-        
+
+            try:
+                # Try loading as continuous raw data first
+                raw = mne.io.read_raw_eeglab(filepath, preload=True, verbose=False)
+                is_epoched = False
+            except TypeError as e:
+                if 'number of trials' in str(e).lower() or 'must be 1' in str(e).lower():
+                    is_epoched = True
+                else:
+                    raise
+
+            if is_epoched:
+                # Read rejection mask before loading epochs (reads same file)
+                rejection_mask = self._read_rejection_mask(filepath) if apply_epoch_rejection else None
+
+                if ignore_epochs:
+                    # Concatenate epochs into pseudo-continuous Raw
+                    raw = self._load_epoched_as_raw(filepath, rejection_mask, max_epochs)
+                else:
+                    # Keep epoch structure for per-epoch PSD
+                    raw = self._load_epochs(filepath, rejection_mask, max_epochs)
+
         # Standardize channel names
         raw.rename_channels(lambda x: x.upper().strip())
-        
+
         # Resample if needed
         if resample_rate and raw.info['sfreq'] != resample_rate:
             raw.resample(resample_rate, verbose=False)
-        
+
         return raw
+
+    def _apply_rejection_and_cap(self, epochs: mne.BaseEpochs,
+                                   rejection_mask: Optional[np.ndarray],
+                                   max_epochs: Optional[int]) -> mne.BaseEpochs:
+        """Filter out rejected epochs and cap the epoch count.
+
+        Args:
+            epochs: Loaded Epochs object.
+            rejection_mask: Boolean array (True = bad), length must match n_epochs.
+                            None means no rejection.
+            max_epochs: Maximum epochs to keep. None means keep all.
+
+        Returns:
+            Filtered/capped Epochs object.
+        """
+        # Apply EEGLAB rejection marks
+        if rejection_mask is not None and len(rejection_mask) == len(epochs):
+            good_idx = np.where(~rejection_mask)[0]
+            epochs = epochs[good_idx]
+
+        # Cap at max_epochs (random subset, reproducible seed)
+        if max_epochs is not None and len(epochs) > max_epochs:
+            rng = np.random.default_rng(42)
+            idx = np.sort(rng.choice(len(epochs), max_epochs, replace=False))
+            epochs = epochs[idx]
+
+        return epochs
+
+    def _load_epoched_as_raw(self, filepath: Path,
+                               rejection_mask: Optional[np.ndarray] = None,
+                               max_epochs: Optional[int] = None) -> mne.io.RawArray:
+        """Load an epoched .set file, apply rejection/cap, concatenate into RawArray."""
+
+        epochs = mne.io.read_epochs_eeglab(filepath, verbose=False)
+        epochs.load_data()
+        epochs = self._apply_rejection_and_cap(epochs, rejection_mask, max_epochs)
+
+        # Get epoch data: (n_epochs, n_channels, n_times)
+        data = epochs.get_data()
+
+        # Concatenate epochs along time axis -> (n_channels, n_epochs * n_times)
+        data_concat = data.transpose(1, 0, 2).reshape(data.shape[1], -1)
+
+        # Create RawArray with same info
+        raw = mne.io.RawArray(data_concat, epochs.info, verbose=False)
+        return raw
+
+    def _load_epochs(self, filepath: Path,
+                      rejection_mask: Optional[np.ndarray] = None,
+                      max_epochs: Optional[int] = None) -> mne.Epochs:
+        """Load an epoched .set file, apply rejection/cap, return Epochs object."""
+
+        epochs = mne.io.read_epochs_eeglab(filepath, verbose=False)
+        epochs.load_data()
+        epochs = self._apply_rejection_and_cap(epochs, rejection_mask, max_epochs)
+        return epochs
     
     def validate_data_loading(self) -> Dict:
         """Validate that data is loading correctly and groups differ"""

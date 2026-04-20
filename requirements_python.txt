@@ -30,5 +30,8 @@ statsmodels>=0.14.0
 tqdm>=4.66.0
 colorama>=0.4.6
 
+# Document generation
+python-docx>=1.1.0
+
 # Optional: For better plotting
 adjustText>=0.8.0
